@@ -18,13 +18,14 @@
 package endpoints
 
 import (
+	"context"
 	"errors"
 	"net/http"
+	"time"
 
-	"github.com/PurotoApp/authfox/internal/helper"
-	"github.com/PurotoApp/libpuroto/libpuroto"
+	"github.com/MCWertGaming/foxkit"
 	"github.com/gin-gonic/gin"
-	"github.com/go-redis/redis"
+	"github.com/go-redis/redis/v9"
 	"gorm.io/gorm"
 )
 
@@ -35,70 +36,52 @@ type sendUpdateData struct {
 	PasswordNew string `json:"password_new"`
 }
 
-func updatePassword(pg_conn *gorm.DB, redisVerify, redisSession *redis.Client) gin.HandlerFunc {
+func updatePassword(ctx *context.Context, pg_conn *gorm.DB, redisVerify, redisSession *redis.Client) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		// only answer if content-type is set right
-		if !libpuroto.JsonRequested(c) {
+		if !foxkit.JsonRequested(c, "AuthFox") {
 			return
 		}
 
 		var sendDataStruct sendUpdateData
 
 		// put the json into the struct
-		if err := c.BindJSON(&sendDataStruct); err != nil {
-			c.AbortWithError(http.StatusBadRequest, err)
-			libpuroto.LogError("authfox", err)
+		if foxkit.BindJson(c, &sendDataStruct, "AuthFox") {
 			return
 		}
 
 		// validate session
-		valid, err := libpuroto.SessionValid(&sendDataStruct.UserID, &sendDataStruct.Token, redisSession)
-		if err != nil {
-			c.AbortWithStatus(http.StatusInternalServerError)
-			libpuroto.LogError("authfox", err)
+		valid, err := foxkit.ValidateSession(ctx, &sendDataStruct.UserID, &sendDataStruct.Token, redisSession, time.Hour*24*14)
+		if foxkit.CheckError(c, &err, "AuthFox") {
 			return
 		} else if !valid {
 			c.AbortWithStatus(http.StatusUnauthorized)
-			libpuroto.LogEvent("authfox", "Received invalid session")
+			foxkit.LogEvent("authfox", "Received invalid session")
 			return
 		}
 
 		// validate old password
 		// get the hashed password
 		localPass, err := findUserPassword(pg_conn, &sendDataStruct.UserID)
-		if err != nil {
-			c.AbortWithStatus(http.StatusInternalServerError)
-			libpuroto.LogError("authfox", err)
+		if foxkit.CheckError(c, &err, "AuthFox") {
 			return
 		}
 		// compare passwords
-		match, err := helper.ComparePasswordAndHash(&sendDataStruct.PasswordOld, &localPass)
-		if err != nil {
-			c.AbortWithStatus(http.StatusInternalServerError)
-			libpuroto.LogError("authfox", err)
-			return
-		}
-		if !match {
-			c.AbortWithStatus(http.StatusUnauthorized)
-			libpuroto.LogEvent("authfox", "Invalid password received")
+		if !foxkit.CheckPassword(c, &localPass, &sendDataStruct.PasswordOld) {
 			return
 		}
 
 		// update password
 		// TODO recycle hash
-		newPassHash, err := helper.CreateHash(&sendDataStruct.PasswordNew)
-		if err != nil {
-			c.AbortWithStatus(http.StatusInternalServerError)
-			libpuroto.LogError("authfox", err)
+		newPassHash, err := foxkit.CreateHash(&sendDataStruct.PasswordNew)
+		if foxkit.CheckError(c, &err, "AuthFox") {
 			return
 		}
 		// save new pass
-		if err := pg_conn.Model(&User{UserID: sendDataStruct.UserID}).Update("password", newPassHash).Error; err != nil {
-			c.AbortWithStatus(http.StatusInternalServerError)
-			libpuroto.LogError("authfox", err)
+		err = pg_conn.Model(&User{UserID: sendDataStruct.UserID}).Update("password", newPassHash).Error
+		if foxkit.CheckError(c, &err, "AuthFox") {
 			return
 		}
-
 		c.Status(http.StatusAccepted)
 	}
 }

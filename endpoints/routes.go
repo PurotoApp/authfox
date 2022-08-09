@@ -18,22 +18,24 @@
 package endpoints
 
 import (
-	"github.com/PurotoApp/libpuroto/libpuroto"
+	"context"
+
+	"github.com/MCWertGaming/foxkit"
 	"github.com/gin-gonic/gin"
-	"github.com/go-redis/redis"
+	"github.com/go-redis/redis/v9"
 	"gorm.io/gorm"
 )
 
-func SetRoutes(router *gin.Engine, pg_conn *gorm.DB, redisVerify, redisSession *redis.Client) {
-	router.POST("/v1/user", registerUser(pg_conn, redisVerify, redisSession))
-	router.POST("/v1/user/login", loginUser(pg_conn, redisVerify, redisSession))
-	router.POST("/v1/user/verify", verifyUser(pg_conn, redisVerify, redisSession))
-	router.POST("/v1/user/validate", validateSession(redisVerify, redisSession))
-	router.PATCH("/v1/user", updatePassword(pg_conn, redisVerify, redisSession))
+func SetRoutes(ctx *context.Context, router *gin.Engine, pg_conn *gorm.DB, redisVerify, redisSession *redis.Client) {
+	router.POST("/v1/user", registerUser(ctx, pg_conn, redisVerify, redisSession))
+	router.POST("/v1/user/login", loginUser(ctx, pg_conn, redisVerify, redisSession))
+	router.POST("/v1/user/verify", verifyUser(ctx, pg_conn, redisVerify, redisSession))
+	router.POST("/v1/user/validate", validateSession(ctx, redisVerify, redisSession))
+	router.PATCH("/v1/user", updatePassword(ctx, pg_conn, redisVerify, redisSession))
 	// router.POST("/v1/user/delete", accountDeletion(collVerifySession, collSession, collUsers, collProfiles))
 	// swagger docs
 	router.Static("/swagger", "swagger/")
 	// user redirects
-	router.GET("/", libpuroto.Redirect("/swagger"))
-	router.GET("/v1", libpuroto.Redirect("/swagger"))
+	router.GET("/", foxkit.Redirect("/swagger"))
+	router.GET("/v1", foxkit.Redirect("/swagger"))
 }

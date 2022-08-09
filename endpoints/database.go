@@ -18,9 +18,6 @@ package endpoints
 
 import (
 	"time"
-
-	"github.com/PurotoApp/libpuroto/libpuroto"
-	"gorm.io/gorm"
 )
 
 // verify DB struct
@@ -54,10 +51,4 @@ type Profile struct {
 	BadgeBetaTester  bool
 	BadgeAlphaTester bool
 	BadgeStaff       bool
-}
-
-func AutoMigrateAuthfox(pg_conn *gorm.DB) {
-	if err := pg_conn.AutoMigrate(&Verify{}, &User{}, &Profile{}); err != nil {
-		libpuroto.ErrorPanic(err)
-	}
 }

@@ -18,44 +18,39 @@
 package main
 
 import (
-	"github.com/PurotoApp/authfox/internal/endpoints"
-	"github.com/PurotoApp/libpuroto/libpuroto"
+	"context"
+
+	"github.com/MCWertGaming/foxkit"
+	"github.com/PurotoApp/authfox/endpoints"
 	"github.com/gin-gonic/gin"
 )
 
 func main() {
 	// connect to the PostgreSQL
-	pg_conn := libpuroto.ConnectDB()
-	if pg_conn.Error != nil {
-		libpuroto.ErrorPanic(pg_conn.Error)
-	}
-	// Connect to Redis
-	redisVerify := libpuroto.Connect(1)
-	redisSession := libpuroto.Connect(2)
+	pg_conn := foxkit.ConnectSQL()
 
-	// check if redis can be reached
-	if err := redisVerify.Ping().Err(); err != nil {
-		libpuroto.ErrorPanic(err)
-	} else if err := redisSession.Ping().Err(); err != nil {
-		libpuroto.ErrorPanic(err)
-	}
+	// create context
+	ctx := context.Background()
+
+	// Connect to Redis and test connection
+	redisVerify := foxkit.ConnectRedis(ctx, 1)
+	redisSession := foxkit.ConnectRedis(ctx, 2)
 
 	// migrate all tables
-	endpoints.AutoMigrateAuthfox(pg_conn)
+	foxkit.AutoMigrateSQL(pg_conn, &endpoints.Verify{}, &endpoints.User{}, &endpoints.Profile{})
 
 	// create router
 	router := gin.Default()
 
 	// configure gin
-	libpuroto.ConfigRouter(router)
+	// TODO: add proxy URL in production
+	foxkit.ConfigRouter(router, nil)
 
 	// set routes
-	endpoints.SetRoutes(router, pg_conn, redisVerify, redisSession)
+	endpoints.SetRoutes(&ctx, router, pg_conn, redisVerify, redisSession)
 
 	// start
-	if err := router.Run("0.0.0.0:3621"); err != nil {
-		libpuroto.ErrorPanic(err)
-	}
+	foxkit.StartRouter(router, "0.0.0.0:4444")
 
 	// clean up
 	redisVerify.Close()
