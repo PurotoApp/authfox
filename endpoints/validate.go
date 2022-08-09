@@ -18,11 +18,13 @@
 package endpoints
 
 import (
+	"context"
 	"net/http"
+	"time"
 
-	"github.com/PurotoApp/libpuroto/libpuroto"
+	"github.com/MCWertGaming/foxkit"
 	"github.com/gin-gonic/gin"
-	"github.com/go-redis/redis"
+	"github.com/go-redis/redis/v9"
 )
 
 type sendSession struct {
@@ -30,30 +32,17 @@ type sendSession struct {
 	Token  string `json:"token"`
 }
 
-func validateSession(redisVerify, redisSession *redis.Client) gin.HandlerFunc {
+func validateSession(ctx *context.Context, redisVerify, redisSession *redis.Client) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		// only answer if content-type is set right
-		if !libpuroto.JsonRequested(c) {
+		if !foxkit.JsonRequested(c, "AuthFox") {
 			return
 		}
-
 		var sendSessionStruct sendSession
-
-		// put the json into the struct
-		if err := c.BindJSON(&sendSessionStruct); err != nil {
-			c.AbortWithError(http.StatusBadRequest, err)
-			libpuroto.LogError("authfox", err)
+		if foxkit.BindJson(c, &sendSessionStruct, "AuthFox") {
 			return
 		}
-
-		valid, err := libpuroto.SessionValid(&sendSessionStruct.UserID, &sendSessionStruct.Token, redisSession)
-		if err != nil {
-			c.AbortWithStatus(http.StatusInternalServerError)
-			libpuroto.LogError("authfox", err)
-			return
-		} else if !valid {
-			c.AbortWithStatus(http.StatusUnauthorized)
-			libpuroto.LogEvent("authfox", "Received invalid session")
+		if !foxkit.CheckSession(ctx, c, &sendSessionStruct.UserID, &sendSessionStruct.Token, redisSession, time.Hour*24*14) {
 			return
 		}
 		c.Status(http.StatusOK)

@@ -18,20 +18,19 @@
 package endpoints
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"strings"
 	"time"
 
-	"github.com/PurotoApp/authfox/internal/helper"
-	"github.com/PurotoApp/libpuroto/libpuroto"
+	"github.com/MCWertGaming/foxkit"
 	"github.com/gin-gonic/gin"
-	"github.com/go-redis/redis"
-	"github.com/google/uuid"
+	"github.com/go-redis/redis/v9"
 	"gorm.io/gorm"
 )
 
-// This struct stores user informations send to the register API endpoint
+// This struct stores user information send to the register API endpoint
 type sendUserProfile struct {
 	// the send user name
 	NameFormat string `json:"user_name"`
@@ -47,25 +46,24 @@ type returnSession struct {
 	Token  string `json:"token"`
 }
 
-func registerUser(pg_conn *gorm.DB, redisVerify, redisSession *redis.Client) gin.HandlerFunc {
+func registerUser(ctx *context.Context, pg_conn *gorm.DB, redisVerify, redisSession *redis.Client) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		// only answer if content-type is set right
-		if !libpuroto.JsonRequested(c) {
+		if !foxkit.JsonRequested(c, "authfox") {
 			return
 		}
 
 		var sendUserStruct sendUserProfile
 
 		// put the json into the struct
-		if err := c.BindJSON(&sendUserStruct); err != nil {
-			c.AbortWithError(http.StatusBadRequest, err)
-			libpuroto.LogError("authfox", err)
+		if !foxkit.BindJson(c, &sendUserStruct, "AuthFox") {
 			return
 		}
+
 		// make sure that the received values are legal
 		if !checkSendUserProfile(&sendUserStruct) {
 			c.AbortWithStatus(http.StatusBadRequest)
-			libpuroto.LogEvent("authfox", "registerUser(): Received invalid or illegal registration data")
+			foxkit.LogEvent("authfox", "registerUser(): Received invalid or illegal registration data")
 			return
 		}
 
@@ -73,11 +71,11 @@ func registerUser(pg_conn *gorm.DB, redisVerify, redisSession *redis.Client) gin
 		result := pg_conn.Where("name_static = ?", strings.ToLower(sendUserStruct.NameFormat)).Where("email = ?", strings.ToLower(sendUserStruct.Email)).Take(&Verify{})
 		if result.Error != nil && !errors.Is(result.Error, gorm.ErrRecordNotFound) {
 			c.AbortWithStatus(http.StatusInternalServerError)
-			libpuroto.LogError("authfox", result.Error)
+			foxkit.LogError("authfox", result.Error)
 			return
 		} else if result.RowsAffected > 0 {
 			c.AbortWithStatus(http.StatusBadRequest)
-			libpuroto.LogEvent("authfox", "Received user that already exists")
+			foxkit.LogEvent("authfox", "Received user that already exists")
 			return
 		}
 
@@ -85,10 +83,8 @@ func registerUser(pg_conn *gorm.DB, redisVerify, redisSession *redis.Client) gin
 		var userData Verify
 
 		// hash the password
-		hash, err := helper.CreateHash(&sendUserStruct.Password)
-		if err != nil {
-			c.AbortWithStatus(http.StatusInternalServerError)
-			libpuroto.LogError("authfox", err)
+		hash, err := foxkit.CreateHash(&sendUserStruct.Password)
+		if foxkit.CheckError(c, &err, "AuthFox") {
 			return
 		}
 		// safe the hashed password
@@ -102,55 +98,40 @@ func registerUser(pg_conn *gorm.DB, redisVerify, redisSession *redis.Client) gin
 		userData.Email = strings.ToLower(sendUserStruct.Email)
 		userData.RegisterIP = c.ClientIP()
 		userData.RegisterTime = time.Now()
-		if userData.VerifyCode, err = libpuroto.RandomString(32); err != nil {
-			c.AbortWithStatus(http.StatusInternalServerError)
-			libpuroto.LogError("authfox", err)
+		userData.VerifyCode, err = foxkit.RandomString(32)
+		if foxkit.CheckError(c, &err, "AuthFox") {
 			return
 		}
 		// create user ID
-		userData.UserID = uuid.New().String()
+		userData.UserID = foxkit.GetUUID()
 
 		// store into DB
-		if err = pg_conn.Create(&userData).Error; err != nil {
-			c.AbortWithStatus(http.StatusInternalServerError)
-			libpuroto.LogError("authfox", err)
+		err = pg_conn.Create(&userData).Error
+		if foxkit.CheckError(c, &err, "AuthFox") {
 			return
 		}
 
 		// create session
-		session, err := helper.CreateSession(&userData.UserID, redisVerify, redisSession, true)
-		if err != nil {
-			c.AbortWithStatus(http.StatusInternalServerError)
-			libpuroto.LogError("authfox", err)
+		sessionID, sessionKey, err := foxkit.CreateSession(ctx, &userData.UserID, redisVerify, 512, 1, time.Hour*48)
+		if foxkit.CheckError(c, &err, "AuthFox") {
 			return
 		}
-
-		// remove the session type as it is always true
-		var basicSession returnSession
-		basicSession.UserID = session.UserID
-		basicSession.Token = session.Token
-
-		c.JSON(http.StatusAccepted, basicSession)
+		c.JSON(http.StatusAccepted, returnSession{sessionID, sessionKey})
 	}
 }
 
-// check the send user data for correctnes and forbidden values
-// TODO: move into Guardian service
+// check the send user data for correctness and forbidden values
 func checkSendUserProfile(profile *sendUserProfile) bool {
 	// TODO: refuse if the name contains slurs / forbidden words
-	// TODO: don't allow special characters:
-	if strings.Count(profile.NameFormat, "") < 6 || strings.Count(profile.NameFormat, "") > 32 ||
-		strings.Count(profile.NameFormat, "@") > 0 || strings.Count(profile.NameFormat, " ") > 0 {
+	if !foxkit.CheckString(profile.NameFormat, 6, 32, true) {
 		return false
 	}
-
 	// TODO: refuse if the email address is forbidden (trashmail etc)
-	if profile.Email == "" || !libpuroto.CheckEmail(profile.Email) {
+	if !foxkit.CheckEmail(profile.Email) {
 		return false
 	}
-
-	// TODO: refuse on weak passwords
-	if strings.Count(profile.Password, "") < 9 || len(profile.Password) > 512 {
+	// TODO: refuse on weak passwords like "password", must be checked before hashing
+	if !foxkit.CheckString(profile.Password, 9, 512, true) {
 		return false
 	}
 	return true

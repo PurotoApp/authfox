@@ -18,12 +18,13 @@
 package endpoints
 
 import (
-	"crypto/subtle"
+	"context"
 	"net/http"
+	"time"
 
-	"github.com/PurotoApp/libpuroto/libpuroto"
+	"github.com/MCWertGaming/foxkit"
 	"github.com/gin-gonic/gin"
-	"github.com/go-redis/redis"
+	"github.com/go-redis/redis/v9"
 	"gorm.io/gorm"
 )
 
@@ -33,52 +34,39 @@ type sendVerify struct {
 	VerifyCode string `json:"verify_code"`
 }
 
-func verifyUser(pg_conn *gorm.DB, redisVerify, redisSession *redis.Client) gin.HandlerFunc {
+func verifyUser(ctx *context.Context, pg_conn *gorm.DB, redisVerify, redisSession *redis.Client) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		// only answer if content-type is set right
-		if !libpuroto.JsonRequested(c) {
+		if !foxkit.JsonRequested(c, "AuthFox") {
 			return
 		}
 
 		var sendVerifyStruct sendVerify
 
 		// put the json into the struct
-		if err := c.BindJSON(&sendVerifyStruct); err != nil {
-			c.AbortWithError(http.StatusBadRequest, err)
-			libpuroto.LogError("authfox", err)
+		if !foxkit.BindJson(c, &sendVerifyStruct, "AuthFox") {
 			return
 		}
 
 		// check if the send values are valid
 		if !checkVerifyStruct(&sendVerifyStruct) {
 			c.AbortWithStatus(http.StatusBadRequest)
-			libpuroto.LogEvent("authfox", "verifyUser(): Recived invalid data")
+			foxkit.LogEvent("authfox", "verifyUser(): Received invalid data")
 			return
 		}
-
-		valid, err := libpuroto.SessionValid(&sendVerifyStruct.UserID, &sendVerifyStruct.Token, redisVerify)
-		if err != nil {
-			c.AbortWithStatus(http.StatusInternalServerError)
-			libpuroto.LogError("authfox", err)
-			return
-		} else if !valid {
-			c.AbortWithStatus(http.StatusUnauthorized)
-			libpuroto.LogEvent("authfox", "verifyUser(): Received verification with invalid session")
+		if !foxkit.CheckSession(ctx, c, &sendVerifyStruct.UserID, &sendVerifyStruct.Token, redisVerify, time.Hour*48) {
 			return
 		}
 
 		// retrieve user data
 		var verifyData Verify
-		if err := pg_conn.Where("user_id = ?", sendVerifyStruct.UserID).Take(&verifyData).Error; err != nil {
-			c.AbortWithStatus(http.StatusInternalServerError)
-			libpuroto.LogError("authfox", err)
+		err := pg_conn.Where("user_id = ?", sendVerifyStruct.UserID).Take(&verifyData).Error
+		if foxkit.CheckError(c, &err, "AuthFox") {
 			return
 		}
 
 		// securely check if the verify token is valid
-		if subtle.ConstantTimeCompare([]byte(sendVerifyStruct.VerifyCode), []byte(verifyData.VerifyCode)) != 1 {
-			c.AbortWithStatus(http.StatusUnauthorized)
-			libpuroto.LogEvent("authfox", "verifyUser(): Received verification with invalid Verify-Code")
+		if !foxkit.CheckToken(c, &sendVerifyStruct.VerifyCode, &verifyData.VerifyCode) {
 			return
 		}
 
@@ -94,9 +82,8 @@ func verifyUser(pg_conn *gorm.DB, redisVerify, redisSession *redis.Client) gin.H
 		userProfile.BadgeAlphaTester = true
 		userProfile.BadgeStaff = false
 		// save into DB
-		if err = pg_conn.Create(&userProfile).Error; err != nil {
-			c.AbortWithStatus(http.StatusInternalServerError)
-			libpuroto.LogError("authfox", err)
+		err = pg_conn.Create(&userProfile).Error
+		if foxkit.CheckError(c, &err, "AuthFox") {
 			return
 		}
 
@@ -107,26 +94,24 @@ func verifyUser(pg_conn *gorm.DB, redisVerify, redisSession *redis.Client) gin.H
 		userData.RegisterIP = verifyData.RegisterIP
 		userData.RegisterTime = verifyData.RegisterTime
 		// save into DB
-		if err = pg_conn.Create(&userData).Error; err != nil {
-			c.AbortWithStatus(http.StatusInternalServerError)
-			libpuroto.LogError("authfox", err)
+		err = pg_conn.Create(&userData).Error
+		if foxkit.CheckError(c, &err, "AuthFox") {
 			return
 		}
 
 		// delete old data
-		if err = pg_conn.Delete(&verifyData).Error; err != nil {
-			c.AbortWithStatus(http.StatusInternalServerError)
-			libpuroto.LogError("authfox", err)
+		err = pg_conn.Delete(&verifyData).Error
+		if foxkit.CheckError(c, &err, "AuthFox") {
 			return
 		}
 
 		// delete old session
-		if err = redisVerify.Del(sendVerifyStruct.UserID).Err(); err != nil {
-			c.AbortWithStatus(http.StatusInternalServerError)
-			libpuroto.LogError("authfox", err)
+		lctx, cancel := context.WithTimeout(*ctx, time.Second*60)
+		err = redisVerify.Del(lctx, sendVerifyStruct.UserID).Err()
+		cancel()
+		if foxkit.CheckError(c, &err, "AuthFox") {
 			return
 		}
-
 		c.Status(http.StatusAccepted)
 	}
 }

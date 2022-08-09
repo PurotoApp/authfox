@@ -18,14 +18,15 @@
 package endpoints
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"strings"
+	"time"
 
-	"github.com/PurotoApp/authfox/internal/helper"
-	"github.com/PurotoApp/libpuroto/libpuroto"
+	"github.com/MCWertGaming/foxkit"
 	"github.com/gin-gonic/gin"
-	"github.com/go-redis/redis"
+	"github.com/go-redis/redis/v9"
 	"gorm.io/gorm"
 )
 
@@ -38,24 +39,28 @@ type sendLogin struct {
 	Password  string `json:"password"`
 }
 
-func loginUser(pg_conn *gorm.DB, redisVerify, redisSession *redis.Client) gin.HandlerFunc {
+type sessionPair struct {
+	UserID     string `json:"uid"`
+	Token      string `json:"token"`
+	VerifyOnly bool   `json:"verify_only"`
+}
+
+func loginUser(ctx *context.Context, pg_conn *gorm.DB, redisVerify, redisSession *redis.Client) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		// only answer if content-type is set right
-		if !libpuroto.JsonRequested(c) {
+		if !foxkit.JsonRequested(c, "AuthFox") {
 			return
 		}
 		var sendLoginStruct sendLogin
 
-		if err := c.BindJSON(&sendLoginStruct); err != nil {
-			c.AbortWithStatus(http.StatusBadRequest)
-			libpuroto.LogError("authfox", err)
+		if !foxkit.BindJson(c, &sendLoginStruct, "AuthFox") {
 			return
 		}
 
 		// check the data for validity
 		if !checkLoginData(&sendLoginStruct) {
 			c.AbortWithStatus(http.StatusBadRequest)
-			libpuroto.LogEvent("authfox", "loginUser(): Invalid data recieved")
+			foxkit.LogEvent("authfox", "loginUser(): Invalid data received")
 			return
 		}
 		// find user
@@ -63,57 +68,50 @@ func loginUser(pg_conn *gorm.DB, redisVerify, redisSession *redis.Client) gin.Ha
 		if err == ErrAccountNotExisting {
 			// account does not exist
 			c.AbortWithStatus(http.StatusUnauthorized)
-			libpuroto.LogEvent("authfox", "Received login for non existent account")
+			foxkit.LogEvent("authfox", "Received login for non existent account")
 			return
-		} else if err != nil {
-			c.AbortWithStatus(http.StatusInternalServerError)
-			libpuroto.LogError("authfox", err)
+		} else if foxkit.CheckError(c, &err, "AuthFox") {
 			return
 		}
 
 		// check if the password matches the stored one
-		match, err := helper.ComparePasswordAndHash(&sendLoginStruct.Password, &localPassword)
-		if err != nil {
-			c.AbortWithStatus(http.StatusInternalServerError)
-			libpuroto.LogError("authfox", err)
-			return
-		} else if !match {
-			c.AbortWithStatus(http.StatusUnauthorized)
-			libpuroto.LogEvent("authfox", "loginUser(): Invalid password received")
+		if !foxkit.CheckPassword(c, &localPassword, &sendLoginStruct.Password) {
 			return
 		}
 
 		// create session
-		session, err := helper.CreateSession(&localUserID, redisVerify, redisSession, verify)
-		if err != nil {
-			c.AbortWithStatus(http.StatusInternalServerError)
-			libpuroto.LogError("authfox", err)
+		var sessionID, sessionKey string
+		if verify {
+			sessionID, sessionKey, err = foxkit.CreateSession(ctx, &localUserID, redisVerify, 512, 1, time.Hour*48)
+		} else {
+			sessionID, sessionKey, err = foxkit.CreateSession(ctx, &localUserID, redisVerify, 512, 5, time.Hour*48)
+		}
+		if foxkit.CheckError(c, &err, "AuthFox") {
 			return
 		}
 
 		// return session
-		c.JSON(http.StatusAccepted, session)
+		c.JSON(http.StatusAccepted, sessionPair{sessionID, sessionKey, verify})
 	}
 }
 
 // returns false if the login struct includes valid data
 func checkLoginData(loginData *sendLogin) bool {
-	if loginData.LoginName == "" {
+	if !foxkit.CheckString(loginData.LoginName, 0, 100, true) {
 		return false
-	}
-	if loginData.Password == "" {
-		return false
+	} else if foxkit.CheckString(loginData.Password, 0, 100, true) {
+		return true
 	}
 	return true
 }
 
 func findUserData(pg_conn *gorm.DB, login *string) (password, UserID string, verify bool, err error) {
-	// we'll send verify as true on failture as they are limited to a single use case
+	// we'll send verify as true on failure as they are limited to a single use case
 
 	var localProfile Profile
 	var res *gorm.DB
 	// switch wether is an email or account name
-	if libpuroto.CheckEmail(strings.ToLower(*login)) {
+	if foxkit.CheckEmail(strings.ToLower(*login)) {
 		// get account by email
 		res = pg_conn.Where("email = ?", strings.ToLower(*login)).Take(&localProfile)
 	} else {
@@ -131,7 +129,7 @@ func findUserData(pg_conn *gorm.DB, login *string) (password, UserID string, ver
 		// searching for one in the verify table
 		var localVerify Verify
 		// switch search method
-		if libpuroto.CheckEmail(strings.ToLower(*login)) {
+		if foxkit.CheckEmail(strings.ToLower(*login)) {
 			// get account by email
 			res = pg_conn.Where("email = ?", strings.ToLower(*login)).Take(&localVerify)
 		} else {
